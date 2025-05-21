@@ -1445,139 +1445,81 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 ```
 
-#### Embedded Content Interface
+#### Embedded Content Interface (Content Scripts)
 
+The content script architecture has been refactored for modularity and better organization. Previously a single monolithic `content-script.js`, it now comprises several specialized modules:
+
+*   **`content-script.js` (Main Coordinator)**:
+    *   Initializes core components like `ContentDetector`, `ContentExtractor`, and `SummarizerEngine`.
+    *   Manages the overall lifecycle of content script operations on page load.
+    *   Exposes core functionalities (like `handleSummarizeRequest`) to other content script modules via a namespaced `window.ContentScriptCore` object.
+    *   Initializes the `FabManager` and `ContentScriptMessageHandler`.
+
+*   **`contentScriptUtils.js`**:
+    *   Provides shared utility functions used across different content script modules.
+    *   Examples include `formatDuration()` for time formatting, `formatSummaryWithTimestamps()` for preparing summary HTML, `convertTimestampToSeconds()` for video navigation, and `attachTimestampHandlersToSidebar()` / `attachTimestampHandlersToInPageSummary()` for making timestamps interactive.
+    *   Also includes `handleVideoNavigation(timeInSeconds)` for seeking in page videos.
+
+*   **`sidebarManager.js`**:
+    *   Responsible for all aspects of the sidebar UI.
+    *   Manages the creation, injection, display, and removal of the sidebar.
+    *   Handles all event listeners within the sidebar (tabs, summary generation, chat, quick settings).
+    *   The HTML template for the sidebar (previously detailed as `createSidebarHTML`) is now an internal part of this manager.
+    *   Communicates with `content-script.js` (via messages) to request summarization and with `background.js` for chat functionality.
+
+*   **`fabManager.js`**:
+    *   Manages the Floating Action Button (FAB) and the in-page summary UI triggered by it.
+    *   `addFloatingActionButton()`: Creates and injects the FAB based on user settings and content type.
+    *   `showInPageSummaryInterface()`: Displays the modal-like UI for in-page summaries. This function now sends a message to `content-script.js` to request summarization, rather than calling `handleSummarizeRequest` directly.
+    *   Includes functions like `updateInPageSummary` and `showSummaryError` to update its UI based on the summarization result.
+
+*   **`contentScriptMessageHandler.js`**:
+    *   Centralizes all `chrome.runtime.onMessage` listening for the content script environment.
+    *   Receives messages from the popup, background script, or other parts of the extension.
+    *   Delegates actions to the appropriate modules:
+        *   Summarization requests (`summarize`, `summarizeForSidebar`, `summarizeForFab`) are routed to `window.ContentScriptCore.handleSummarizeRequest` in `content-script.js`.
+        *   Sidebar toggling (`toggleSidebar`) is routed to `SidebarManager.toggle()`.
+        *   Video navigation requests (`navigateVideo`) are routed to `handleVideoNavigation()` (from `contentScriptUtils.js`).
+
+**Example: Initialization in `content-script.js`**
 ```javascript
-// content-script.js
+// content-script.js (Simplified)
 let contentDetector, contentExtractor, summarizerEngine;
-let currentSummary = null;
-let currentMetadata = null;
+// ... other global variables for content script core logic ...
 
-// Initialize components when page loads
 window.addEventListener('load', () => {
-  // Initialize content processing components
+  // Initialize core components
   contentDetector = new ContentDetector();
   contentExtractor = new ContentExtractor();
+  // ... initialize summarizerEngine ...
+
+  // Expose core functions needed by other modules
+  window.ContentScriptCore = {
+    handleSummarizeRequest: handleSummarizeRequest 
+  };
   
-  // Check current user settings and initialize LLM provider
-  chrome.storage.sync.get(['llmProvider', 'apiKey', 'model'], (settings) => {
-    const provider = LLMProviderFactory.create(
-      settings.llmProvider || 'openai',
-      settings.apiKey || '',
-      { model: settings.model }
-    );
-    
-    summarizerEngine = new SummarizerEngine(provider);
-  });
-  
-  // Listen for messages from popup
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'summarize') {
-      handleSummarizeRequest(request.options, sendResponse);
-      return true; // Keep channel open for async response
-    }
-  });
-  
-  // Add floating action button if appropriate
-  addFloatingActionButton();
+  // Initialize UI Managers and Message Handler
+  if (typeof FabManager !== 'undefined' && FabManager.initialize) {
+    FabManager.initialize();
+  }
+  if (typeof ContentScriptMessageHandler !== 'undefined' && ContentScriptMessageHandler.initialize) {
+    ContentScriptMessageHandler.initialize();
+  }
+  // Note: SidebarManager is typically initialized on demand via a message.
 });
 
 async function handleSummarizeRequest(options, sendResponse) {
-  try {
-    // Detect content type
-    const contentType = contentDetector.detect(window.location.href);
-    
-    // Extract content
-    const content = await contentExtractor.extract(contentType);
-    
-    // Generate summary
-    const summary = await summarizerEngine.summarize(content, options);
-    
-    // Store for later use
-    currentSummary = summary;
-    currentMetadata = {
-      title: content.title,
-      author: content.author,
-      type: content.type,
-      duration: content.duration,
-      url: content.url
-    };
-    
-    // Send response back to popup
-    sendResponse({
-      success: true,
-      summary,
-      metadata: currentMetadata
-    });
-    
-  } catch (error) {
-    console.error('Summarization failed:', error);
-    sendResponse({
-      success: false,
-      error: error.message
-    });
-  }
+  // ... core summarization logic ...
+  // This function now also uses formatSummaryWithTimestamps and formatDuration
+  // from contentScriptUtils.js to prepare pre-formatted HTML for the response.
 }
 
-function addFloatingActionButton() {
-  // Only add if we're on a supported content type
-  const contentType = contentDetector.detect(window.location.href);
-  if (contentType === 'unknown') return;
-  
-  // Create button element
-  const button = document.createElement('div');
-  button.className = 'content-summarizer-fab';
-  button.innerHTML = '<svg>...</svg>'; // Add appropriate icon SVG
-  button.title = 'Summarize Content';
-  
-  // Add click handler
-  button.addEventListener('click', () => {
-    // Show in-page summary interface
-    showInPageSummaryInterface();
-  });
-  
-  // Append to body
-  document.body.appendChild(button);
-}
-
-function showInPageSummaryInterface() {
-  // Create UI container
-  const container = document.createElement('div');
-  container.className = 'content-summarizer-container';
-  
-  // Add loading state initially
-  container.innerHTML = `
-    <div class="content-summarizer-header">
-      <h2>Content Summary</h2>
-      <button class="content-summarizer-close">×</button>
-    </div>
-    <div class="content-summarizer-body">
-      <div class="content-summarizer-loading">
-        Analyzing content and generating summary...
-      </div>
-    </div>
-  `;
-  
-  // Add to page
-  document.body.appendChild(container);
-  
-  // Add close handler
-  container.querySelector('.content-summarizer-close').addEventListener('click', () => {
-    container.remove();
-  });
-  
-  // Start summarization process
-  handleSummarizeRequest({ length: 'medium' }, (response) => {
-    if (response.success) {
-      updateInPageSummary(container, response.summary, response.metadata);
-    } else {
-      showSummaryError(container, response.error);
-    }
-  });
-}
-
-// Other UI helper functions...
+// Functions like addFloatingActionButton, showInPageSummaryInterface, createSidebarHTML,
+// and the main message listener are NO LONGER directly in content-script.js.
+// They are encapsulated in their respective manager modules.
 ```
+
+This modular structure makes the content script easier to maintain and understand, with each module having a clear responsibility.
 
 ### 6. Extension Configuration Files
 

@@ -24,6 +24,10 @@
             "llm-providers.js",
             "content-processor.js",
             "engines.js",
+            "contentScriptUtils.js",
+            "sidebarManager.js",
+            "fabManager.js",
+            "contentScriptMessageHandler.js",
             "content-script.js"
           ],
       "css": ["content-styles.css"]
